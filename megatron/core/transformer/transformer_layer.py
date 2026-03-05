@@ -1028,7 +1028,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         CUDA graph replay for this layer and microbatch `self.current_microbatch` using TE
         interface. TransformerEngine versions>=1.10 allow keyword arguments with CUDA graph.
         However, CUDA graph accepts only Tensor inputs.
-        Hence, `inference_context` and `packed_seq_params` are excluded from input list.
+        Hence, non-Tensor kwargs (e.g. inference_context, packed_seq_params) are filtered out
+        before calling the base replay; the captured graph only uses Tensor inputs.
         """
         context = None
         if self.config.cuda_graph_scope and CudaGraphScope.attn not in self.config.cuda_graph_scope:
@@ -1036,15 +1037,13 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             args = (hidden_states,)
             kwargs = {}
 
-        assert (kwargs.get('inference_context') is None) and (
-            kwargs.get('packed_seq_params') is None
-        ), (
-            "CUDA graph accepts only Tensor inputs. "
-            "inference_context and packed_seq_params are excluded from input list. "
-            "For inference cuda graph, please use cuda_graph_impl=local instead."
-        )
+        # Base class asserts all kwargs are None or Tensor; this layer receives
+        # inference_context, packed_seq_params, etc. Pass only Tensor/None to base.
+        kwargs_tensor_only = {
+            k: v for k, v in kwargs.items() if v is None or isinstance(v, torch.Tensor)
+        }
 
-        cuda_graph_output = list(super()._te_cuda_graph_replay(*args, **kwargs))
+        cuda_graph_output = list(super()._te_cuda_graph_replay(*args, **kwargs_tensor_only))
 
         if kwargs.get('context') is not None:
             context = cuda_graph_output.pop()

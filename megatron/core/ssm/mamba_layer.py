@@ -181,13 +181,19 @@ class MambaLayer(GraphableMegatronModule):
         CUDA graph replay for this layer and microbatch `self.current_microbatch` using TE
         interface. TransformerEngine versions>=1.10 allow keyword arguments with CUDA graph.
         However, CUDA graph accepts only Tensor inputs.
-        Hence, `inference_context` is excluded from input list.
+        Hence, non-Tensor kwargs (e.g. inference_context, packed_seq_params) are filtered out
+        before calling the base replay; the captured graph only uses Tensor inputs.
         """
         assert kwargs.get('inference_context') is None, (
             "CUDA graph accepts only Tensor inputs. inference_context is excluded from input list. "
             "For inference cuda graph, please use cuda_graph_impl=local instead."
         )
-        return super()._te_cuda_graph_replay(*args, **kwargs)
+        # Base class asserts all kwargs are None or Tensor; Mamba receives packed_seq_params
+        # (PackedSeqParams) and other non-Tensor kwargs. Pass only Tensor/None to base.
+        kwargs_tensor_only = {
+            k: v for k, v in kwargs.items() if v is None or isinstance(v, torch.Tensor)
+        }
+        return super()._te_cuda_graph_replay(*args, **kwargs_tensor_only)
 
     def _should_call_local_cudagraph(self, *args, **kwargs):
         """
