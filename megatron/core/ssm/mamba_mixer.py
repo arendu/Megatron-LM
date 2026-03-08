@@ -706,8 +706,12 @@ class MambaMixer(MegatronModule):
         # Example: [0, 5, 7, 11, 16] -> [5, 2, 4, 5]
         seq_lengths = cu_seqlens_with_max[1:] - cu_seqlens_with_max[:-1]
         # Example: [5, 2, 4, 5] -> [0, 0, 0, 0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3]
+        # Pass output_size to avoid a GPU→CPU sync that repeat_interleave performs when the
+        # output length is unknown (it would call sum(seq_lengths) on the GPU and wait).
         seq_idx = torch.repeat_interleave(
-            torch.arange(seq_lengths.numel(), device=cu_seqlens.device), seq_lengths
+            torch.arange(seq_lengths.numel(), device=cu_seqlens.device),
+            seq_lengths,
+            output_size=total_tokens,
         )
         seq_idx = seq_idx.to(torch.int32).unsqueeze(0)  # Add a batch dimension
         return seq_idx
