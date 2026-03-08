@@ -2061,14 +2061,17 @@ def get_thd_batch_on_this_cp_rank(
     sequence dimension into multiple chunks, which are parallelized
     across GPUs in a context parallel group.
     """
+    max_seqlen_int = int(max_seqlen[0].item())
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
         cu_seqlens_q=cu_seqlens,
         cu_seqlens_kv=cu_seqlens,
         cu_seqlens_q_padded=cu_seqlens_padded,
         cu_seqlens_kv_padded=cu_seqlens_padded,
-        max_seqlen_q=int(max_seqlen[0].item()),
-        max_seqlen_kv=int(max_seqlen[0].item()),
+        max_seqlen_q=max_seqlen_int,
+        max_seqlen_kv=max_seqlen_int,
+        max_seqlen_q_tensor=max_seqlen[0] if max_seqlen.dim() >= 1 else max_seqlen,
+        max_seqlen_kv_tensor=max_seqlen[0] if max_seqlen.dim() >= 1 else max_seqlen,
     )
 
     cp_size = parallel_state.get_context_parallel_world_size() if cp_size is None else cp_size

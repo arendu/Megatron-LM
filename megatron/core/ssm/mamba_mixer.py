@@ -689,6 +689,11 @@ class MambaMixer(MegatronModule):
         cu_seqlens_q_padded[-1] == max_seqlen then this additional sequence index will not be
         included.
         """
+        # If a pre-allocated seq_idx buffer is provided (CUDA graph capture/replay path),
+        # return it directly to avoid torch.tensor/torch.cat inside graph capture.
+        if packed_seq_params.seq_idx is not None:
+            return packed_seq_params.seq_idx
+
         # Example: [0, 5, 7, 11] -> [0, 5, 7, 11, 16]
         if packed_seq_params.cu_seqlens_q_padded is not None:
             cu_seqlens = packed_seq_params.cu_seqlens_q_padded
