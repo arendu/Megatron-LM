@@ -1046,7 +1046,7 @@ def pretrain(
     app_metrics['app_build_dataiters_finish_time'] = one_logger_utils.get_timestamp_in_ms()
 
     # For DynamicCP: wrap all iterators here in pretrain() so that ALL evaluate()
-    # calls (inside train() and post-training in pretrain()) use the wrapped format.
+    # calls (inside train() and post-training/test in pretrain()) use the wrapped format.
     if args.hybrid_context_parallel:
         if train_data_iterator is not None:
             train_data_iterator = iter(HybridCPDataLoaderWrapper(train_data_iterator, config))
@@ -1057,6 +1057,13 @@ def pretrain(
             ]
         elif valid_data_iterator is not None:
             valid_data_iterator = iter(HybridCPDataLoaderWrapper(valid_data_iterator, config))
+        if isinstance(test_data_iterator, list):
+            test_data_iterator = [
+                iter(HybridCPDataLoaderWrapper(t, config)) if t is not None else None
+                for t in test_data_iterator
+            ]
+        elif test_data_iterator is not None:
+            test_data_iterator = iter(HybridCPDataLoaderWrapper(test_data_iterator, config))
 
     # Track if training is enabled. Can only be done once args.do_train is assigned after dataloader is built.
     one_logger_utils.track_config_flags(
