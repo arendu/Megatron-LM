@@ -243,6 +243,23 @@ class HybridCPDataLoaderWrapper:
         }
         return recv_sample_with_id
 
+    def unpad_batch(self, batch):
+        """
+        Removes the end padding from the batch which could lead to an invalid sample.
+        If the last sub-sequence in a packed sample has an all-zero loss_mask (i.e.,
+        it is a prompt-only padding sequence with no target tokens), it is removed to
+        prevent zero-denominator issues in per-token loss computation.
+        """
+        for sample in batch:
+            end_sample_token_count = int(sample["cu_seqlens"][-1] - sample["cu_seqlens"][-2])
+            if sample["loss_mask"][-end_sample_token_count:].sum() == 0:
+                sample["cu_seqlens"][-1] = sample["cu_seqlens"][-2]
+                for key in sample.keys():
+                    if key in ["cu_seqlens", "batch_idx", "max_seqlen"]:
+                        continue
+                    sample[key] = sample[key][:-end_sample_token_count]
+        return batch
+
     def unpack_batch(self, batch):
         """
         Unpacks the packed samples into a list of sub-samples.
@@ -432,6 +449,7 @@ class HybridCPDataLoaderWrapper:
             return None, None
         else:
             batch = next(self.data_iterator)
+        batch = self.unpad_batch(batch)
         subsample_seqlens = []
         for sample in batch:
             subsample_seqlens.extend(

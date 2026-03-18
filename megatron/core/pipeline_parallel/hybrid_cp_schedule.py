@@ -525,6 +525,7 @@ def hybrid_context_parallel_forward_backward(
     total_num_tokens,
     check_first_val_step,
     model_type,
+    pg_collection,
 ):
     """
     Scheduler for Hybrid Context Parallel.
@@ -610,6 +611,7 @@ def hybrid_context_parallel_forward_backward(
                     input_tensor,
                     forward_data_store,
                     config,
+                    pg_collection.cp.size(),
                     collect_non_loss_data,
                     is_first_microbatch=check_first_val_step(
                         first_val_step, forward_only, current_microbatch == 0
@@ -657,6 +659,7 @@ def hybrid_context_parallel_forward_backward(
         input_tensor,
         forward_data_store,
         config,
+        pg_collection.cp.size(),
         collect_non_loss_data,
         is_first_microbatch=check_first_val_step(
             first_val_step, forward_only, current_microbatch == 0
