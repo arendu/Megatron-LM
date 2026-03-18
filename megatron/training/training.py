@@ -146,6 +146,7 @@ from megatron.core.transformer.moe.moe_utils import track_moe_metrics, clear_aux
 from megatron.core.pipeline_parallel.hybrid_cp_schedule import get_num_total_groups
 from megatron.core.transformer.experimental_attention_variant.dsa import DSAIndexerLossLoggingHelper
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
+from megatron.core import parallel_state
 from megatron.core.parallel_state import (
     destroy_global_memory_buffer,
     destroy_model_parallel,
@@ -1043,6 +1044,19 @@ def pretrain(
     timers('train/valid/test-data-iterators-setup').stop()
     print_datetime('after dataloaders are built')
     app_metrics['app_build_dataiters_finish_time'] = one_logger_utils.get_timestamp_in_ms()
+
+    # For DynamicCP: wrap all iterators here in pretrain() so that ALL evaluate()
+    # calls (inside train() and post-training in pretrain()) use the wrapped format.
+    if args.hybrid_context_parallel:
+        if train_data_iterator is not None:
+            train_data_iterator = iter(HybridCPDataLoaderWrapper(train_data_iterator, config))
+        if isinstance(valid_data_iterator, list):
+            valid_data_iterator = [
+                iter(HybridCPDataLoaderWrapper(v, config)) if v is not None else None
+                for v in valid_data_iterator
+            ]
+        elif valid_data_iterator is not None:
+            valid_data_iterator = iter(HybridCPDataLoaderWrapper(valid_data_iterator, config))
 
     # Track if training is enabled. Can only be done once args.do_train is assigned after dataloader is built.
     one_logger_utils.track_config_flags(
@@ -2603,9 +2617,6 @@ def train(
     energy_monitor = get_energy_monitor()
     one_logger = get_one_logger()
 
-    if args.hybrid_context_parallel:
-        train_data_iterator = iter(HybridCPDataLoaderWrapper(train_data_iterator, config))
-
     if args.run_workload_inspector_server:
         try:
             from workload_inspector.utils.webserver import run_server
@@ -3206,6 +3217,17 @@ def evaluate(
     rerun_mode = rerun_state_machine.get_mode()
     rerun_state_machine.set_mode(RerunMode.DISABLED)
 
+    # For DynamicCP: reset all module CP groups back to the full CP group.
+    # DynamicCP modifies pg_collection.cp per microbatch during training.
+    # For eval, valid_data_iterator is wrapped with HybridCPDataLoaderWrapper,
+    # so hybrid_context_parallel_forward_backward handles it correctly (forward_only=True).
+    if args.hybrid_context_parallel:
+        _full_cp_group = parallel_state.get_context_parallel_group()
+        for _model_module in model:
+            for _module in _model_module.modules():
+                if hasattr(_module, 'pg_collection') and _module.pg_collection is not None:
+                    _module.pg_collection.cp = _full_cp_group
+
     total_loss_dict = {}
 
     # make validation batch size independent from training batch size
@@ -3267,27 +3289,12 @@ def evaluate(
                     val = [x[key].view(-1) for x in loss_dicts]
 
                     if val[0].numel() == 2:
-                        if args.sft:
-                            # normalize over micro batch instead of global
-                            val = torch.vstack(val)
-                            val = val[:, 0] / val[:, 1].clamp(min=1)
-                            val = val.mean()
-                            torch.distributed.all_reduce(
-                                val,
-                                group=mpu.get_data_parallel_group(with_context_parallel=True)
-                            )
-                            val /= torch.distributed.get_world_size(
-                                group=mpu.get_data_parallel_group(with_context_parallel=True)
-                            )
-                            total_loss_dict[key][0] += val
-                            total_loss_dict[key][1] += 1
-                        else :
-                            val = torch.vstack(val).sum(dim=0)
-                            torch.distributed.all_reduce(
-                                val,
-                                group=mpu.get_data_parallel_group(with_context_parallel=True)
-                            )
-                            total_loss_dict[key] += val
+                        val = torch.vstack(val).sum(dim=0)
+                        torch.distributed.all_reduce(
+                            val,
+                            group=mpu.get_data_parallel_group(with_context_parallel=True)
+                        )
+                        total_loss_dict[key] += val
                     elif val[0].numel() == 1:
                         val = torch.cat(val).sum()
                         total_loss_dict[key][0] += val
