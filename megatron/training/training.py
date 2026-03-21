@@ -2097,7 +2097,10 @@ def training_log(
 
     # Log MTP metrics.
     if args.mtp_num_layers is not None:
-        mtp_loss_scale = 1 / (_hybrid_groups if _hybrid_groups > 0 else get_num_microbatches())
+        # _hybrid_groups is only defined when hybrid_context_parallel=True (MoE metrics block above).
+        # Fall back to num_microbatches when not using DynamicCP.
+        _hg = _hybrid_groups if args.hybrid_context_parallel else 0
+        mtp_loss_scale = 1 / (_hg if _hg > 0 else get_num_microbatches())
         MTPLossLoggingHelper.track_mtp_metrics(
             mtp_loss_scale, iteration, writer, wandb_writer, total_loss_dict
         )
