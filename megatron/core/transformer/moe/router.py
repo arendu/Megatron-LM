@@ -223,6 +223,9 @@ class TopKRouter(Router):
         We keep it in float32 to avoid routing errors when updating the expert_bias.
         """
         if hasattr(self, 'expert_bias') and self.expert_bias is not None:
+            from megatron.core.transformer.cuda_graphs import is_graph_warmup
+            if is_graph_warmup():
+                return
             if self.expert_bias.dtype != torch.float32:
                 self.expert_bias.data = self.expert_bias.data.to(torch.float32)
 
