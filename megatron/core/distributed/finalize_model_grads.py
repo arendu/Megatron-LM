@@ -297,6 +297,7 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
     """
     tokens_per_expert_list = []
     expert_bias_list = []
+    frozen_tokens_per_expert_list = []
     for model_chunk in model:
         for module in get_attr_wrapped_model(model_chunk, 'modules')():
             # Only update expert_bias if this module is in the training mode. There are special
@@ -304,8 +305,14 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
             # when using online knoweldge-distillation with Model-Optimizer. In this case, we want
             # to avoid updating teacher's expert_bias.
             if hasattr(module, 'expert_bias') and module.training:
-                tokens_per_expert_list.append(module.local_tokens_per_expert)
-                expert_bias_list.append(module.expert_bias)
+                if getattr(module, '_freeze_expert_bias', False):
+                    frozen_tokens_per_expert_list.append(module.local_tokens_per_expert)
+                else:
+                    tokens_per_expert_list.append(module.local_tokens_per_expert)
+                    expert_bias_list.append(module.expert_bias)
+    # Zero counters for frozen routers without updating their bias.
+    for tokens_per_expert in frozen_tokens_per_expert_list:
+        tokens_per_expert.zero_()
     # For hybrid models with both MoE and Dense layers, this list can be empty.
     if len(expert_bias_list) == 0:
         return

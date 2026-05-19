@@ -1,7 +1,9 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
+from contextlib import nullcontext
 from typing import Literal, Optional
 
+import torch
 from torch import Tensor
 
 from megatron.core import tensor_parallel
@@ -294,14 +296,23 @@ class MambaModel(LanguageModule):
         # assert attention_mask is None, "The attention mask is ignored and should be set to None"
 
         # Run decoder.
-        hidden_states = self.decoder(
-            hidden_states=decoder_input,
-            attention_mask=attention_mask,
-            inference_context=inference_context,
-            rotary_pos_emb=rotary_pos_emb,
-            packed_seq_params=packed_seq_params,
-            padding_mask=padding_mask,
+        # When the base model is frozen for MTP training, run the decoder under
+        # torch.no_grad() so that PyTorch does not save intermediate activations
+        # for the backward pass through the frozen layers — a major memory saving.
+        freeze_ctx = (
+            torch.no_grad()
+            if getattr(self.config, 'freeze_base_model_for_mtp', False) and self.training
+            else nullcontext()
         )
+        with freeze_ctx:
+            hidden_states = self.decoder(
+                hidden_states=decoder_input,
+                attention_mask=attention_mask,
+                inference_context=inference_context,
+                rotary_pos_emb=rotary_pos_emb,
+                packed_seq_params=packed_seq_params,
+                padding_mask=padding_mask,
+            )
 
         output_weight = None
         if self.share_embeddings_and_output_weights:

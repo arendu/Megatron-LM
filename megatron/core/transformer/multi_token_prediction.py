@@ -22,6 +22,7 @@ from megatron.core.tensor_parallel import (
 )
 from megatron.core.transformer.enums import AttnMaskType, LayerType
 from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.attention import SelfAttention
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.torch_norm import LayerNormBuilder
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
@@ -45,6 +46,31 @@ SUPPORTED_ATTN_MASK = [
     AttnMaskType.no_mask,
     AttnMaskType.padding_causal,
 ]
+
+def _hsm_mix(hidden_states_list, mode):
+    """Mix accumulated hidden states for Hidden State Mixing (HSM).
+
+    For each token position, randomly selects one layer's hidden state
+    from the accumulated history (uniform_layer_sample).
+
+    Args:
+        hidden_states_list: list of tensors, each [s, b, h]
+        mode: 'uniform_layer_sample'
+    Returns:
+        mixed hidden states tensor [s, b, h]
+    """
+    if mode != 'uniform_layer_sample':
+        raise ValueError(f"Unknown HSM mode: {mode}")
+
+    n = len(hidden_states_list)
+    s, b, h = hidden_states_list[0].shape
+    indices = torch.randint(0, n, (s, b, 1), device=hidden_states_list[0].device)
+    stacked = torch.stack(hidden_states_list, dim=0)  # [n, s, b, h]
+    one_hot = (
+        torch.arange(n, device=indices.device).view(n, 1, 1, 1) == indices.unsqueeze(0)
+    ).float()
+    return (stacked * one_hot).sum(dim=0)
+
 
 try:
     import transformer_engine as te  # pylint: disable=unused-import
@@ -1244,6 +1270,53 @@ class MultiTokenPredictionBlock(MegatronModule):
         assert len(self.layers) > 0, "MultiTokenPredictionBlock must have at least one layer."
         self.cp_group = pg_collection.cp
 
+        self.share_kv = config.mtp_share_kv
+        # Cache SelfAttention modules per layer for shared KV (avoids repeated tree walks)
+        if self.share_kv:
+            self._attn_modules_per_layer = {
+                i: [m for m in layer.modules() if isinstance(m, SelfAttention)]
+                for i, layer in enumerate(self.layers)
+            }
+
+    def _set_kv_capture(self, enabled):
+        """Enable or disable K,V capture on all attention modules across all MTP layers.
+        Always clears shared KV state to prevent stale data between steps."""
+        for layer_idx in self._attn_modules_per_layer:
+            for attn in self._attn_modules_per_layer[layer_idx]:
+                attn._mtp_capture_kv = enabled
+                attn._mtp_shared_kv = None
+
+    def _get_attn_modules(self, layer_idx):
+        """Get cached SelfAttention modules for a given layer index."""
+        return self._attn_modules_per_layer[layer_idx]
+
+    def _collect_captured_kv(self, layer_idx):
+        """Collect captured K,V from all attention modules within the MTP layer.
+
+        Returns:
+            list of (key, value) tuples, one per attention module.
+        """
+        kv_list = []
+        for attn in self._get_attn_modules(layer_idx):
+            if attn._mtp_captured_kv is not None:
+                kv_list.append(attn._mtp_captured_kv)
+                attn._mtp_captured_kv = None
+        return kv_list
+
+    def _set_shared_kv(self, layer_idx, kv_list):
+        """Set shared K,V on all attention modules within the MTP layer.
+
+        Args:
+            kv_list: list of (key, value) tuples, one per attention module.
+        """
+        attn_modules = self._get_attn_modules(layer_idx)
+        assert len(attn_modules) == len(kv_list), (
+            f"Number of attention modules ({len(attn_modules)}) does not match "
+            f"number of shared K,V entries ({len(kv_list)})"
+        )
+        for attn, (k, v) in zip(attn_modules, kv_list):
+            attn._mtp_shared_kv = (k, v)
+
     def _build_layers(self, pg_collection):
         # Determine number of depths to build
         if self.mtp_num_depths > 0:
@@ -1361,12 +1434,51 @@ class MultiTokenPredictionBlock(MegatronModule):
         offset = get_mtp_layer_offset(self.config, self.vp_stage)
         hidden_states_list = list(torch.chunk(hidden_states, 1 + offset, dim=0))
         hidden_states = hidden_states_list[offset]
+
+        # HSM: Hidden State Mixing accumulates all hidden states and mixes them
+        # as input for subsequent layers. Only active during training.
+        hsm_mode = getattr(self.config, 'mtp_hsm_mode', None) if self.training else None
+        if hsm_mode is not None:
+            hsm_hidden_history = [hidden_states]
+
+        prev_kv_list = None
+        if self.share_kv:
+            self._set_kv_capture(True)
+
         for iteration in range(self.config.mtp_num_layers):
             layer_idx = 0 if self.mtp_use_repeated_layer else iteration
+
+            # HSM: diagonal alignment + mixing of accumulated hidden states.
+            # Shift older entries by -1 so all entries at position i correspond
+            # to the same target token. Entry j accumulates (k - j) total rolls
+            # by iteration k. The last entry (just appended) needs 0 shifts.
+            if hsm_mode is not None and len(hidden_states_history) > 1:
+                entries_to_roll = hidden_states_history[:-1]
+                last_entry = hidden_states_history[-1]
+                n = len(entries_to_roll)
+                s, b, h = entries_to_roll[0].shape
+                stacked = torch.stack(entries_to_roll, dim=0)  # [n, s, b, h]
+                flat = stacked.permute(0, 2, 3, 1).reshape(n * b, h, s)  # [n*b, h, s]
+                rolled, _ = roll_tensor(
+                    flat, shifts=-1, dims=-1,
+                    cp_group=self.cp_group,
+                    packed_seq_params=packed_seq_params,
+                )
+                hidden_states_history = list(
+                    rolled.reshape(n, b, h, s).permute(0, 3, 1, 2).unbind(0)
+                ) + [last_entry]
+                hs_input = _hsm_mix(hidden_states_history, hsm_mode)
+            else:
+                hs_input = hidden_states
+
+            # Shared KV: inject K,V from the previous iteration
+            if self.share_kv and iteration > 0 and prev_kv_list is not None:
+                self._set_shared_kv(layer_idx, prev_kv_list)
+
             (hidden_states, input_ids, position_ids) = self.layers[layer_idx](
                 input_ids=input_ids,
                 position_ids=position_ids,
-                hidden_states=hidden_states,
+                hidden_states=hs_input,
                 attention_mask=attention_mask,
                 inference_params=inference_params,
                 rotary_pos_emb=rotary_pos_emb,
@@ -1377,6 +1489,14 @@ class MultiTokenPredictionBlock(MegatronModule):
                 embedding=embedding,
                 **(extra_block_kwargs or {}),
             )
+
+            # Collect captured K,V for the next iteration
+            if self.share_kv:
+                prev_kv_list = self._collect_captured_kv(layer_idx)
+
+            # Accumulate for HSM mixing in subsequent layers
+            if hsm_mode is not None:
+                hsm_hidden_history.append(hidden_states)
 
             # append the output hidden states of the current mtp layer
             # to the hidden_states_list

@@ -624,6 +624,23 @@ def validate_args(args, defaults={}):
                 "This argument will be ignored.",
                 args.rank
             )
+    if getattr(args, 'mtp_hsm_mode', None) is not None:
+        has_prerequisites = (args.mtp_num_layers and args.mtp_num_layers >= 2)
+        if not has_prerequisites:
+            # Auto-disable HSM when prerequisites aren't met
+            args.mtp_hsm_mode = None
+
+    if getattr(args, 'freeze_base_model_for_mtp', False):
+        assert args.mtp_num_layers, (
+            "--freeze-base-model-for-mtp requires --mtp-num-layers to be set."
+        )
+
+    if getattr(args, 'mtp_share_kv', False):
+        assert args.mtp_num_layers and args.mtp_num_layers >= 2, (
+            "--mtp-share-kv requires --mtp-num-layers >= 2 "
+            "(first layer does regular attention, subsequent layers reuse K,V)."
+        )
+
     # === End of MTP validation ===
     
     # Uneven virtual pipeline parallelism

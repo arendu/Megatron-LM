@@ -62,6 +62,18 @@ class TransformerConfig(ModelParallelConfig):
     mtp_use_repeated_layer: bool = False
     """Use a single MTP layer repeatedly instead of multiple separate layers."""
 
+    freeze_base_model_for_mtp: bool = False
+    """Freeze all base model parameters and run the decoder under torch.no_grad()
+    to avoid storing activations for the backward pass through the frozen layers."""
+
+    mtp_hsm_mode: Optional[str] = None
+    """Hidden State Mixing mode for MTP. Options: 'uniform_layer_sample'.
+    When None, HSM is disabled."""
+
+    mtp_share_kv: bool = False
+    """Enable shared KV between MTP layers. MTP layer X reuses K,V from layer X-1.
+    First MTP layer always does regular attention. Requires mtp_num_layers >= 2."""
+
     mtp_hybrid_override_pattern: Optional[str] = None
     """DEPRECATED: Use unified hybrid_override_pattern instead.
     Legacy argument for loading old checkpoints.

@@ -1128,6 +1128,17 @@ class Attention(MegatronModule, ABC):
         nvtx_range_pop(suffix="rotary_pos_emb")
 
         # ==================================
+        # MTP shared KV: capture / inject
+        # ==================================
+        # Capture K,V (after RoPE) for sharing with the next MTP iteration.
+        if getattr(self, '_mtp_capture_kv', False):
+            self._mtp_captured_kv = (key, value)
+
+        # Use shared K,V from the previous MTP iteration instead of locally computed ones.
+        if getattr(self, '_mtp_shared_kv', None) is not None:
+            key, value = self._mtp_shared_kv
+
+        # ==================================
         # core attention computation
         # ==================================
 
@@ -1295,6 +1306,13 @@ class SelfAttention(Attention):
             )
         else:
             self.k_layernorm = None
+
+        # MTP shared KV state: set externally by MultiTokenPredictionBlock.
+        # _mtp_capture_kv: when True, store computed K,V (after RoPE) in _mtp_captured_kv.
+        # _mtp_shared_kv: when set, use these K,V instead of locally computed ones.
+        self._mtp_shared_kv = None   # Optional[Tuple[Tensor, Tensor]]
+        self._mtp_capture_kv = False
+        self._mtp_captured_kv = None # Optional[Tuple[Tensor, Tensor]]
 
     def run_realtime_tests(self):
         """Performs a consistency check.
